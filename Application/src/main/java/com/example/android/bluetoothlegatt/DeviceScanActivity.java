@@ -40,12 +40,24 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
+import android.widget.Button;
 import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.mbientlab.metawear.Data;
 import com.mbientlab.metawear.MetaWearBoard;
+import com.mbientlab.metawear.Route;
+import com.mbientlab.metawear.Subscriber;
 import com.mbientlab.metawear.android.BtleService;
+import com.mbientlab.metawear.builder.RouteBuilder;
+import com.mbientlab.metawear.builder.RouteComponent;
+import com.mbientlab.metawear.data.Acceleration;
+import com.mbientlab.metawear.data.AngularVelocity;
+import com.mbientlab.metawear.module.Accelerometer;
+import com.mbientlab.metawear.module.AccelerometerBmi160;
+import com.mbientlab.metawear.module.AccelerometerBosch;
+import com.mbientlab.metawear.module.GyroBmi160;
 
 import org.w3c.dom.Text;
 
@@ -69,6 +81,10 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
     private Handler mHandler;
     private HashSet<UUID> filterServiceUuids;
     private BtleService.LocalBinder serviceBinder;
+    private HashSet<MetaWearBoard> metaWearBoards = new HashSet<MetaWearBoard>();
+
+    private Button mStartButton;
+    private Button mStopButton;
 
     private static final int REQUEST_ENABLE_BT = 1;
     // Stops scanning after 10 seconds.
@@ -78,8 +94,13 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getActionBar().setTitle(R.string.title_devices);
+        setContentView(R.layout.main);
         mHandler = new Handler();
         filterServiceUuids = getUuids();
+
+        mStartButton = (Button) findViewById(R.id.startbutton);
+        mStopButton = (Button) findViewById(R.id.stopbutton);
+        addListeners();
 
         // Use this check to determine whether BLE is supported on the device.  Then you can
         // selectively disable BLE-related features.
@@ -191,7 +212,7 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
                     else {
                         MWDeviceConfirmationFragment confirmation = new MWDeviceConfirmationFragment();
                         confirmation.flashDeviceLight(board, getFragmentManager());
-
+                        metaWearBoards.add(board);
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
@@ -248,10 +269,86 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
         getApplicationContext().unbindService(this);
     }
 
+    private void addListeners() {
+        mStartButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                for (MetaWearBoard board : metaWearBoards) {
+                    final AccelerometerBmi160 accelerometer = board.getModule(AccelerometerBmi160.class);
+                    final GyroBmi160 gyroscope = board.getModule(GyroBmi160.class);
+
+                    accelerometer.configure()
+                            .odr(AccelerometerBmi160.OutputDataRate.ODR_25_HZ)
+                            .range(AccelerometerBosch.AccRange.AR_4G)
+                            .commit();
+                    accelerometer.acceleration().addRouteAsync(new RouteBuilder() {
+                        @Override
+                        public void configure(RouteComponent source) {
+                            source.stream(new Subscriber() {
+                                @Override
+                                public void apply(Data data, Object... env) {
+                                    Log.i("MainActivity", data.value(Acceleration.class).toString());
+                                }
+                            });
+                        }
+                    }).continueWith(new Continuation<Route, Void>() {
+                        @Override
+                        public Void then(Task<Route> task) throws Exception {
+                            accelerometer.acceleration().start();
+                            accelerometer.start();
+                            return null;
+                        }
+                    });
+
+                    gyroscope.configure()
+                            .odr(GyroBmi160.OutputDataRate.ODR_25_HZ)
+                            .range(GyroBmi160.Range.FSR_250)
+                            .commit();
+                    gyroscope.angularVelocity().addRouteAsync(new RouteBuilder() {
+                        @Override
+                        public void configure(RouteComponent source) {
+                            source.stream(new Subscriber() {
+                                @Override
+                                public void apply(Data data, Object... env) {
+                                    Log.i("MainActivity", data.value(AngularVelocity.class).toString());
+                                }
+                            });
+                        }
+                    }).continueWith(new Continuation<Route, Void>() {
+                        @Override
+                        public Void then(Task<Route> task) throws Exception {
+                            gyroscope.angularVelocity().start();
+                            gyroscope.start();
+                            return null;
+                        }
+                    });
+
+                }
+            }
+        });
+
+        mStopButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                for (MetaWearBoard board : metaWearBoards) {
+                    final AccelerometerBmi160 accelerometer = board.getModule(AccelerometerBmi160.class);
+                    final GyroBmi160 gyroscope = board.getModule(GyroBmi160.class);
+
+                    accelerometer.acceleration().stop();
+                    accelerometer.stop();
+                    gyroscope.angularVelocity().stop();
+                    gyroscope.stop();
+                }
+            }
+        });
+    }
+
     // Adapter for holding devices found through scanning.
     private class LeDeviceListAdapter extends BaseAdapter {
         private ArrayList<BluetoothDevice> mLeDevices;
         private LayoutInflater mInflator;
+
+
 
         public LeDeviceListAdapter() {
             super();
