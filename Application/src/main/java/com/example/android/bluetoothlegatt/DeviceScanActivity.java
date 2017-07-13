@@ -29,7 +29,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.media.MediaScannerConnection;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.ParcelUuid;
@@ -58,15 +60,26 @@ import com.mbientlab.metawear.module.Accelerometer;
 import com.mbientlab.metawear.module.AccelerometerBmi160;
 import com.mbientlab.metawear.module.AccelerometerBosch;
 import com.mbientlab.metawear.module.GyroBmi160;
+import com.mbientlab.metawear.module.Logging;
 
 import org.w3c.dom.Text;
 
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Exchanger;
 
 import bolts.Continuation;
 import bolts.Task;
@@ -81,10 +94,12 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
     private Handler mHandler;
     private HashSet<UUID> filterServiceUuids;
     private BtleService.LocalBinder serviceBinder;
-    private HashSet<MetaWearBoard> metaWearBoards = new HashSet<MetaWearBoard>();
+    private HashSet<MetaWearBoard> metaWearBoards = new HashSet<>();
+    private HashMap<String, ArrayList<SensorRecord>> datamap = new HashMap<>();
 
     private Button mStartButton;
     private Button mStopButton;
+    private Button mResetButton;
 
     private static final int REQUEST_ENABLE_BT = 1;
     // Stops scanning after 10 seconds.
@@ -273,7 +288,10 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
         mStartButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                for (MetaWearBoard board : metaWearBoards) {
+                for (final MetaWearBoard board : metaWearBoards) {
+                    datamap.put(board.getMacAddress() + "_ACCEL", new ArrayList<SensorRecord>());
+                    datamap.put(board.getMacAddress() + "_GYRO", new ArrayList<SensorRecord>());
+
                     final AccelerometerBmi160 accelerometer = board.getModule(AccelerometerBmi160.class);
                     final GyroBmi160 gyroscope = board.getModule(GyroBmi160.class);
 
@@ -287,7 +305,10 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
                             source.stream(new Subscriber() {
                                 @Override
                                 public void apply(Data data, Object... env) {
-                                    Log.i("MainActivity", data.value(Acceleration.class).toString());
+                                    Acceleration accel = data.value(Acceleration.class);
+                                    datamap.get(board.getMacAddress() + "_ACCEL")
+                                            .add(new SensorRecord(data.formattedTimestamp(), accel.x(), accel.y(), accel.z()));
+                                    Log.i("Accel: ", data.formattedTimestamp() + ", " + accel.x() + ", " + accel.y() + ", " + accel.z());
                                 }
                             });
                         }
@@ -310,7 +331,10 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
                             source.stream(new Subscriber() {
                                 @Override
                                 public void apply(Data data, Object... env) {
-                                    Log.i("MainActivity", data.value(AngularVelocity.class).toString());
+                                    AngularVelocity gyro = data.value(AngularVelocity.class);
+                                    datamap.get(board.getMacAddress() + "_GYRO")
+                                            .add(new SensorRecord(data.formattedTimestamp(), gyro.x(), gyro.y(), gyro.z()));
+                                    Log.i("Gyro: ", data.formattedTimestamp() + ", " + gyro.x() + ", " + gyro.y() + ", " + gyro.z());
                                 }
                             });
                         }
@@ -322,7 +346,6 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
                             return null;
                         }
                     });
-
                 }
             }
         });
@@ -338,9 +361,51 @@ public class DeviceScanActivity extends ListActivity implements ServiceConnectio
                     accelerometer.stop();
                     gyroscope.angularVelocity().stop();
                     gyroscope.stop();
+                    board.tearDown();
+                    board.disconnectAsync().continueWith(new Continuation<Void, Void>() {
+                        @Override
+                        public Void then(Task<Void> task) throws Exception {
+                            Log.i("MainActivity", "Disconnected");
+                            return null;
+                        }
+                    });
                 }
+
+                writeFiles();
             }
         });
+    }
+
+    private void writeFiles() {
+        File directory = new File(Environment.getExternalStorageDirectory()
+            + File.separator + "PERL LAB");
+        if (!directory.isDirectory()) {
+            Log.i("Main", "Directory created: " + directory.getAbsolutePath());
+            directory.mkdirs();
+        }
+
+        for (Map.Entry<String, ArrayList<SensorRecord>> entry : datamap.entrySet()) {
+            String filename = entry.getKey().replace(":", "-");
+            String timestamp = entry.getValue().get(0).getTimestamp().substring(0, 16).replace(":", "");
+            File file = new File(directory, filename + "_" + timestamp + ".txt");
+            Log.i("Main", "Filename: " + file.getAbsolutePath());
+
+            try {
+                BufferedWriter bufferedWriter = new BufferedWriter(new FileWriter(file));
+                for (SensorRecord record : entry.getValue()) {
+                    bufferedWriter.write(record.toString());
+                    bufferedWriter.newLine();
+                }
+                bufferedWriter.close();
+            }
+            catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            // Discover new files
+            String[] path = {file.getAbsolutePath()};
+            MediaScannerConnection.scanFile(getApplicationContext(), path, null, null);
+        }
     }
 
     // Adapter for holding devices found through scanning.
